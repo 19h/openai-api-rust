@@ -305,7 +305,13 @@ impl Client {
     /// # Errors
     /// - `Error::APIError` if the server returns an error
     pub async fn engines(&self) -> Result<Vec<api::EngineInfo>> {
-        self.get("engines").await.map(|r: api::Container<_>| r.data)
+        self.get(
+            &self.build_url_from_path(
+                &format!(
+                    "engines",
+                ),
+            ),
+        ).await.map(|r: api::Container<_>| r.data)
     }
 
     /// Retrieves an engine instance
@@ -315,7 +321,14 @@ impl Client {
     /// # Errors
     /// - `Error::APIError` if the server returns an error
     pub async fn engine(&self, engine: &str) -> Result<api::EngineInfo> {
-        self.get(&format!("engines/{}", engine)).await
+        self.get(
+            &self.build_url_from_path(
+                &format!(
+                    "engines/{}",
+                    engine,
+                ),
+            ),
+        ).await
     }
 
     // Private helper to generate post requests. Needs to be a bit more flexible than
@@ -345,6 +358,11 @@ impl Client {
         }
     }
 
+    /// Build an OpenAI API url from a relative path
+    pub fn build_url_from_path(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
     /// Get predicted completion of the prompt
     ///
     /// # Errors
@@ -355,7 +373,15 @@ impl Client {
     ) -> Result<api::Completion> {
         let args = prompt.into();
         Ok(self
-            .post(&format!("engines/{}/completions", args.engine), args)
+            .post(
+                &self.build_url_from_path(
+                    &format!(
+                        "engines/{}/completions",
+                        args.engine,
+                    )
+                ),
+                args,
+            )
             .await?)
     }
 }
