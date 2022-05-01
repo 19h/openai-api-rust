@@ -1,5 +1,5 @@
 ///! Example that prints out a story from a prompt. Used in the readme.
-use openai_api::Client;
+use openai_api_fork::Client;
 
 #[tokio::main]
 async fn main() {

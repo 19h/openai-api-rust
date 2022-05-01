@@ -1,16 +1,17 @@
-# openai-api-rust
-![docs](https://docs.rs/openai-api/badge.svg)
-[![Crates.io](https://img.shields.io/crates/v/openai-api.svg)](https://crates.io/crates/openai-api)
-![build](https://github.com/deontologician/openai-api-rust/workflows/Continuous%20Integration/badge.svg)
+# openai-api-rust-fork
 
 A simple rust client for OpenAI API.
 
 Has a few conveniences, but is mostly at the level of the API itself.
 
+### NOTE!
+
+This is a fork of openai-api. This fork removes the sync and async features and only provides an async api. Also, surf was removed because the maintainer of http-rs is unresponsive. This fork now uses reqwest which is well maintained by the author of hyper.
+
 # Installation
 
 ```
-$ cargo add openai-api
+$ cargo add openai-api-fork
 ```
 
 # Quickstart
@@ -19,7 +20,7 @@ $ cargo add openai-api
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_token = std::env::var("OPENAI_SK")?;
-    let client = openai_api::Client::new(&api_token);
+    let client = openai_api_fork::Client::new(&api_token);
     let prompt = String::from("Once upon a time,");
     println!(
         "{}{}",
@@ -43,7 +44,7 @@ println!("{}", response);
 To configure the prompt more explicitly, you can use the `CompletionArgs` builder:
 
 ```rust
-let args = openai_api::api::CompletionArgs::builder()
+let args = openai_api_fork::api::CompletionArgs::builder()
         .prompt("Once upon a time,")
         .engine("davinci")
         .max_tokens(20)

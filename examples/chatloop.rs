@@ -1,4 +1,4 @@
-use openai_api::{api::CompletionArgs, Client};
+use openai_api_fork::{api::CompletionArgs, Client};
 
 const START_PROMPT: &str = "
 The following is a conversation with an AI assistant.
