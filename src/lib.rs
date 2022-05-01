@@ -213,9 +213,8 @@ pub enum Error {
     #[error("Bad arguments: {0}")]
     BadArguments(String),
     /// Network / protocol related errors
-    #[cfg(feature = "async")]
     #[error("Error at the protocol level: {0}")]
-    AsyncProtocol(surf::Error),
+    AsyncProtocol(reqwest::Error),
 }
 
 impl From<api::ErrorMessage> for Error {
@@ -230,20 +229,17 @@ impl From<String> for Error {
     }
 }
 
-#[cfg(feature = "async")]
-impl From<surf::Error> for Error {
-    fn from(e: surf::Error) -> Self {
+impl From<reqwest::Error> for Error {
+    fn from(e: reqwest::Error) -> Self {
         Error::AsyncProtocol(e)
     }
 }
 
 /// Authentication middleware
-#[cfg(feature = "async")]
 struct BearerToken {
     token: String,
 }
 
-#[cfg(feature = "async")]
 impl std::fmt::Debug for BearerToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Get the first few characters to help debug, but not accidentally log key
@@ -255,7 +251,6 @@ impl std::fmt::Debug for BearerToken {
     }
 }
 
-#[cfg(feature = "async")]
 impl BearerToken {
     fn new(token: &str) -> Self {
         Self {
@@ -264,71 +259,41 @@ impl BearerToken {
     }
 }
 
-#[cfg(feature = "async")]
-#[surf::utils::async_trait]
-impl surf::middleware::Middleware for BearerToken {
-    async fn handle(
-        &self,
-        mut req: surf::Request,
-        client: surf::Client,
-        next: surf::middleware::Next<'_>,
-    ) -> surf::Result<surf::Response> {
-        log::debug!("Request: {:?}", req);
-        req.insert_header("Authorization", format!("Bearer {}", self.token));
-        let response: surf::Response = next.run(req, client).await?;
-        log::debug!("Response: {:?}", response);
-        Ok(response)
-    }
-}
-
-#[cfg(feature = "async")]
-fn async_client(token: &str, base_url: &str) -> surf::Client {
-    let mut async_client = surf::client();
-    async_client.set_base_url(surf::Url::parse(base_url).expect("Static string should parse"));
-    async_client.with(BearerToken::new(token))
-}
-
 /// Client object. Must be constructed to talk to the API.
 #[derive(Debug, Clone)]
 pub struct Client {
-    #[cfg(feature = "async")]
-    async_client: surf::Client,
+    client: reqwest::Client,
+    base_url: String,
+    token: String,
 }
 
 impl Client {
     // Creates a new `Client` given an api token
     #[must_use]
     pub fn new(token: &str) -> Self {
-        let base_url: String = "https://api.openai.com/v1/".into();
         Self {
-            #[cfg(feature = "async")]
-            async_client: async_client(token, &base_url),
+            client: reqwest::Client::new(),
+            base_url: "https://api.openai.com/v1/".to_string(),
+            token: token.to_string(),
         }
-    }
-
-    // Allow setting the api root in the tests
-    #[cfg(test)]
-    fn set_api_root(mut self, base_url: &str) -> Self {
-        #[cfg(feature = "async")]
-        {
-            self.async_client.set_base_url(
-                surf::Url::parse(base_url).expect("static URL expected to parse correctly"),
-            );
-        }
-        self
     }
 
     /// Private helper for making gets
-    #[cfg(feature = "async")]
     async fn get<T>(&self, endpoint: &str) -> Result<T>
     where
         T: serde::de::DeserializeOwned,
     {
-        let mut response = self.async_client.get(endpoint).await?;
-        if let surf::StatusCode::Ok = response.status() {
-            Ok(response.body_json::<T>().await?)
+        let mut response =
+            self.client
+                .get(endpoint)
+                .header("Authorization", format!("Bearer {}", self.token))
+                .send()
+                .await?;
+
+        if let reqwest::StatusCode::OK = response.status() {
+            Ok(response.json::<T>().await?)
         } else {
-            let err = response.body_json::<api::ErrorWrapper>().await?.error;
+            let err = response.json::<api::ErrorWrapper>().await?.error;
             Err(Error::Api(err))
         }
     }
@@ -339,7 +304,6 @@ impl Client {
     ///
     /// # Errors
     /// - `Error::APIError` if the server returns an error
-    #[cfg(feature = "async")]
     pub async fn engines(&self) -> Result<Vec<api::EngineInfo>> {
         self.get("engines").await.map(|r: api::Container<_>| r.data)
     }
@@ -350,29 +314,30 @@ impl Client {
     ///
     /// # Errors
     /// - `Error::APIError` if the server returns an error
-    #[cfg(feature = "async")]
     pub async fn engine(&self, engine: &str) -> Result<api::EngineInfo> {
         self.get(&format!("engines/{}", engine)).await
     }
 
     // Private helper to generate post requests. Needs to be a bit more flexible than
     // get because it should support SSE eventually
-    #[cfg(feature = "async")]
     async fn post<B, R>(&self, endpoint: &str, body: B) -> Result<R>
     where
         B: serde::ser::Serialize,
         R: serde::de::DeserializeOwned,
     {
         let mut response = self
-            .async_client
+            .client
             .post(endpoint)
-            .body(surf::Body::from_json(&body)?)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&body)
+            .send()
             .await?;
+
         match response.status() {
-            surf::StatusCode::Ok => Ok(response.body_json::<R>().await?),
+            reqwest::StatusCode::OK => Ok(response.json::<R>().await?),
             _ => Err(Error::Api(
                 response
-                    .body_json::<api::ErrorWrapper>()
+                    .json::<api::ErrorWrapper>()
                     .await
                     .expect("The API has returned something funky")
                     .error,
@@ -384,7 +349,6 @@ impl Client {
     ///
     /// # Errors
     ///  - `Error::APIError` if the api returns an error
-    #[cfg(feature = "async")]
     pub async fn complete_prompt(
         &self,
         prompt: impl Into<api::CompletionArgs>,
@@ -394,385 +358,4 @@ impl Client {
             .post(&format!("engines/{}/completions", args.engine), args)
             .await?)
     }
-}
-
-// TODO: add a macro to de-boilerplate the sync and async tests
-
-#[allow(unused_macros)]
-macro_rules! async_test {
-    ($test_name: ident, $test_body: block) => {
-        #[cfg(feature = "async")]
-        #[tokio::test]
-        async fn $test_name() -> crate::Result<()> {
-            $test_body;
-            Ok(())
-        }
-    };
-}
-
-#[cfg(test)]
-mod unit {
-
-    use mockito::Mock;
-
-    use crate::{
-        api::{self, Completion, CompletionArgs, EngineInfo},
-        Client, Error,
-    };
-
-    fn mocked_client() -> Client {
-        let _ = env_logger::builder().is_test(true).try_init();
-        Client::new("bogus").set_api_root(&format!("{}/", mockito::server_url()))
-    }
-
-    #[test]
-    fn can_create_client() {
-        let _c = mocked_client();
-    }
-
-    #[test]
-    fn parse_engine_info() -> Result<(), Box<dyn std::error::Error>> {
-        let example = r#"{
-            "id": "ada",
-            "object": "engine",
-            "owner": "openai",
-            "ready": true
-        }"#;
-        let ei: api::EngineInfo = serde_json::from_str(example)?;
-        assert_eq!(
-            ei,
-            api::EngineInfo {
-                id: "ada".into(),
-                owner: "openai".into(),
-                ready: true,
-            }
-        );
-        Ok(())
-    }
-
-    fn mock_engines() -> (Mock, Vec<EngineInfo>) {
-        let mock = mockito::mock("GET", "/engines")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{
-            "object": "list",
-            "data": [
-              {
-                "id": "ada",
-                "object": "engine",
-                "owner": "openai",
-                "ready": true
-              },
-              {
-                "id": "babbage",
-                "object": "engine",
-                "owner": "openai",
-                "ready": true
-              },
-              {
-                "id": "experimental-engine-v7",
-                "object": "engine",
-                "owner": "openai",
-                "ready": false
-              },
-              {
-                "id": "curie",
-                "object": "engine",
-                "owner": "openai",
-                "ready": true
-              },
-              {
-                "id": "davinci",
-                "object": "engine",
-                "owner": "openai",
-                "ready": true
-              },
-              {
-                 "id": "content-filter-alpha-c4",
-                 "object": "engine",
-                 "owner": "openai",
-                 "ready": true
-              }
-            ]
-          }"#,
-            )
-            .create();
-
-        let expected = vec![
-            EngineInfo {
-                id: "ada".into(),
-                owner: "openai".into(),
-                ready: true,
-            },
-            EngineInfo {
-                id: "babbage".into(),
-                owner: "openai".into(),
-                ready: true,
-            },
-            EngineInfo {
-                id: "experimental-engine-v7".into(),
-                owner: "openai".into(),
-                ready: false,
-            },
-            EngineInfo {
-                id: "curie".into(),
-                owner: "openai".into(),
-                ready: true,
-            },
-            EngineInfo {
-                id: "davinci".into(),
-                owner: "openai".into(),
-                ready: true,
-            },
-            EngineInfo {
-                id: "content-filter-alpha-c4".into(),
-                owner: "openai".into(),
-                ready: true,
-            },
-        ];
-        (mock, expected)
-    }
-
-    async_test!(parse_engines_async, {
-        let (_m, expected) = mock_engines();
-        let response = mocked_client().engines().await?;
-        assert_eq!(response, expected);
-    });
-
-    sync_test!(parse_engines_sync, {
-        let (_m, expected) = mock_engines();
-        let response = mocked_client().engines_sync()?;
-        assert_eq!(response, expected);
-    });
-
-    fn mock_engine() -> (Mock, api::ErrorMessage) {
-        let mock = mockito::mock("GET", "/engines/davinci")
-            .with_status(404)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{
-                "error": {
-                    "code": null,
-                    "message": "Some kind of error happened",
-                    "type": "some_error_type"
-                }
-            }"#,
-            )
-            .create();
-        let expected = api::ErrorMessage {
-            message: "Some kind of error happened".into(),
-            error_type: "some_error_type".into(),
-        };
-        (mock, expected)
-    }
-
-    async_test!(engine_error_response_async, {
-        let (_m, expected) = mock_engine();
-        let response = mocked_client().engine("davinci").await;
-        if let Result::Err(Error::Api(msg)) = response {
-            assert_eq!(expected, msg);
-        }
-    });
-
-    sync_test!(engine_error_response_sync, {
-        let (_m, expected) = mock_engine();
-        let response = mocked_client().engine_sync("davinci");
-        if let Result::Err(Error::Api(msg)) = response {
-            assert_eq!(expected, msg);
-        }
-    });
-    fn mock_completion() -> crate::Result<(Mock, CompletionArgs, Completion)> {
-        let mock = mockito::mock("POST", "/engines/davinci/completions")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{
-                "id": "cmpl-uqkvlQyYK7bGYrRHQ0eXlWi7",
-                "object": "text_completion",
-                "created": 1589478378,
-                "model": "davinci:2020-05-03",
-                "choices": [
-                    {
-                    "text": " there was a girl who",
-                    "index": 0,
-                    "logprobs": null,
-                    "finish_reason": "length"
-                    }
-                ]
-                }"#,
-            )
-            .expect(1)
-            .create();
-        let args = api::CompletionArgs::builder()
-            .engine("davinci")
-            .prompt("Once upon a time")
-            .max_tokens(5)
-            .temperature(1.0)
-            .top_p(1.0)
-            .n(1)
-            .stop(vec!["\n".into()])
-            .build()?;
-        let expected = api::Completion {
-            id: "cmpl-uqkvlQyYK7bGYrRHQ0eXlWi7".into(),
-            created: 1589478378,
-            model: "davinci:2020-05-03".into(),
-            choices: vec![api::Choice {
-                text: " there was a girl who".into(),
-                index: 0,
-                logprobs: None,
-                finish_reason: "length".into(),
-            }],
-        };
-        Ok((mock, args, expected))
-    }
-
-    // Defines boilerplate here. The Completion can't derive Eq since it contains
-    // floats in various places.
-    fn assert_completion_equal(a: Completion, b: Completion) {
-        assert_eq!(a.model, b.model);
-        assert_eq!(a.id, b.id);
-        assert_eq!(a.created, b.created);
-        let (a_choice, b_choice) = (&a.choices[0], &b.choices[0]);
-        assert_eq!(a_choice.text, b_choice.text);
-        assert_eq!(a_choice.index, b_choice.index);
-        assert!(a_choice.logprobs.is_none());
-        assert_eq!(a_choice.finish_reason, b_choice.finish_reason);
-    }
-
-    async_test!(completion_args_async, {
-        let (m, args, expected) = mock_completion()?;
-        let response = mocked_client().complete_prompt(args).await?;
-        assert_completion_equal(response, expected);
-        m.assert();
-    });
-
-    sync_test!(completion_args_sync, {
-        let (m, args, expected) = mock_completion()?;
-        let response = mocked_client().complete_prompt_sync(args)?;
-        assert_completion_equal(response, expected);
-        m.assert();
-    });
-}
-
-#[cfg(test)]
-mod integration {
-    use crate::{
-        api::{self, Completion},
-        Client,
-    };
-    /// Used by tests to get a client to the actual api
-    fn get_client() -> Client {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let sk = std::env::var("OPENAI_SK").expect(
-            "To run integration tests, you must put set the OPENAI_SK env var to your api token",
-        );
-        Client::new(&sk)
-    }
-
-    async_test!(can_get_engines_async, {
-        let client = get_client();
-        client.engines().await?
-    });
-
-    sync_test!(can_get_engines_sync, {
-        let client = get_client();
-        let engines = client
-            .engines_sync()?
-            .into_iter()
-            .map(|ei| ei.id)
-            .collect::<Vec<_>>();
-        assert!(engines.contains(&"ada".into()));
-        assert!(engines.contains(&"babbage".into()));
-        assert!(engines.contains(&"curie".into()));
-        assert!(engines.contains(&"davinci".into()));
-    });
-
-    fn assert_engine_correct(engine_id: &str, info: api::EngineInfo) {
-        assert_eq!(info.id, engine_id);
-        assert!(info.ready);
-        assert_eq!(info.owner, "openai");
-    }
-    async_test!(can_get_engine_async, {
-        let client = get_client();
-        assert_engine_correct("ada", client.engine("ada").await?);
-    });
-
-    sync_test!(can_get_engine_sync, {
-        let client = get_client();
-        assert_engine_correct("ada", client.engine_sync("ada")?);
-    });
-
-    async_test!(complete_string_async, {
-        let client = get_client();
-        client.complete_prompt("Hey there").await?;
-    });
-
-    sync_test!(complete_string_sync, {
-        let client = get_client();
-        client.complete_prompt_sync("Hey there")?;
-    });
-
-    fn create_args() -> api::CompletionArgs {
-        api::CompletionArgsBuilder::default()
-            .prompt("Once upon a time,")
-            .max_tokens(10)
-            .temperature(0.5)
-            .top_p(0.5)
-            .n(1)
-            .logprobs(3)
-            .echo(false)
-            .stop(vec!["\n".into()])
-            .presence_penalty(0.5)
-            .frequency_penalty(0.5)
-            .logit_bias(maplit::hashmap! {
-                "1".into() => 1.0,
-                "23".into() => 0.0,
-            })
-            .build()
-            .expect("Bug: build should succeed")
-    }
-    async_test!(complete_explicit_params_async, {
-        let client = get_client();
-        let args = create_args();
-        client.complete_prompt(args).await?;
-    });
-
-    sync_test!(complete_explicit_params_sync, {
-        let client = get_client();
-        let args = create_args();
-        client.complete_prompt_sync(args)?
-    });
-
-    fn stop_condition_args() -> api::CompletionArgs {
-        api::CompletionArgs::builder()
-            .prompt(
-                r#"
-Q: Please type `#` now
-A:"#,
-            )
-            // turn temp & top_p way down to prevent test flakiness
-            .temperature(0.0)
-            .top_p(0.0)
-            .max_tokens(100)
-            .stop(vec!["#".into(), "\n".into()])
-            .build()
-            .expect("Bug: build should succeed")
-    }
-
-    fn assert_completion_finish_reason(completion: Completion) {
-        assert_eq!(completion.choices[0].finish_reason, "stop",);
-    }
-
-    async_test!(complete_stop_condition_async, {
-        let client = get_client();
-        let args = stop_condition_args();
-        assert_completion_finish_reason(client.complete_prompt(args).await?);
-    });
-
-    sync_test!(complete_stop_condition_sync, {
-        let client = get_client();
-        let args = stop_condition_args();
-        assert_completion_finish_reason(client.complete_prompt_sync(args)?);
-    });
 }
