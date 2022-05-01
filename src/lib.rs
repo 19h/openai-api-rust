@@ -128,7 +128,7 @@ pub mod api {
     }
 
     impl TryFrom<CompletionArgsBuilder> for CompletionArgs {
-        type Error = String;
+        type Error = CompletionArgsBuilderError;
 
         fn try_from(builder: CompletionArgsBuilder) -> Result<Self, Self::Error> {
             builder.build()
@@ -216,9 +216,6 @@ pub enum Error {
     #[cfg(feature = "async")]
     #[error("Error at the protocol level: {0}")]
     AsyncProtocol(surf::Error),
-    #[cfg(feature = "sync")]
-    #[error("Error at the protocol level, sync client")]
-    SyncProtocol(ureq::Error),
 }
 
 impl From<api::ErrorMessage> for Error {
@@ -237,13 +234,6 @@ impl From<String> for Error {
 impl From<surf::Error> for Error {
     fn from(e: surf::Error) -> Self {
         Error::AsyncProtocol(e)
-    }
-}
-
-#[cfg(feature = "sync")]
-impl From<ureq::Error> for Error {
-    fn from(e: ureq::Error) -> Self {
-        Error::SyncProtocol(e)
     }
 }
 
@@ -298,20 +288,11 @@ fn async_client(token: &str, base_url: &str) -> surf::Client {
     async_client.with(BearerToken::new(token))
 }
 
-#[cfg(feature = "sync")]
-fn sync_client(token: &str) -> ureq::Agent {
-    ureq::agent().auth_kind("Bearer", token).build()
-}
-
 /// Client object. Must be constructed to talk to the API.
 #[derive(Debug, Clone)]
 pub struct Client {
     #[cfg(feature = "async")]
     async_client: surf::Client,
-    #[cfg(feature = "sync")]
-    sync_client: ureq::Agent,
-    #[cfg(feature = "sync")]
-    base_url: String,
 }
 
 impl Client {
@@ -322,10 +303,6 @@ impl Client {
         Self {
             #[cfg(feature = "async")]
             async_client: async_client(token, &base_url),
-            #[cfg(feature = "sync")]
-            sync_client: sync_client(token),
-            #[cfg(feature = "sync")]
-            base_url,
         }
     }
 
@@ -337,10 +314,6 @@ impl Client {
             self.async_client.set_base_url(
                 surf::Url::parse(base_url).expect("static URL expected to parse correctly"),
             );
-        }
-        #[cfg(feature = "sync")]
-        {
-            self.base_url = String::from(base_url);
         }
         self
     }
@@ -360,28 +333,6 @@ impl Client {
         }
     }
 
-    #[cfg(feature = "sync")]
-    fn get_sync<T>(&self, endpoint: &str) -> Result<T>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let response = dbg!(self
-            .sync_client
-            .get(&format!("{}{}", self.base_url, endpoint)))
-        .call();
-        if let 200 = response.status() {
-            Ok(response
-                .into_json_deserialize()
-                .expect("Bug: client couldn't deserialize api response"))
-        } else {
-            let err = response
-                .into_json_deserialize::<api::ErrorWrapper>()
-                .expect("Bug: client couldn't deserialize api error response")
-                .error;
-            Err(Error::Api(err))
-        }
-    }
-
     /// Lists the currently available engines.
     ///
     /// Provides basic information about each one such as the owner and availability.
@@ -393,17 +344,6 @@ impl Client {
         self.get("engines").await.map(|r: api::Container<_>| r.data)
     }
 
-    /// Lists the currently available engines.
-    ///
-    /// Provides basic information about each one such as the owner and availability.
-    ///
-    /// # Errors
-    /// - `Error::APIError` if the server returns an error
-    #[cfg(feature = "sync")]
-    pub fn engines_sync(&self) -> Result<Vec<api::EngineInfo>> {
-        self.get_sync("engines").map(|r: api::Container<_>| r.data)
-    }
-
     /// Retrieves an engine instance
     ///
     /// Provides basic information about the engine such as the owner and availability.
@@ -413,11 +353,6 @@ impl Client {
     #[cfg(feature = "async")]
     pub async fn engine(&self, engine: &str) -> Result<api::EngineInfo> {
         self.get(&format!("engines/{}", engine)).await
-    }
-
-    #[cfg(feature = "sync")]
-    pub fn engine_sync(&self, engine: &str) -> Result<api::EngineInfo> {
-        self.get_sync(&format!("engines/{}", engine))
     }
 
     // Private helper to generate post requests. Needs to be a bit more flexible than
@@ -445,31 +380,6 @@ impl Client {
         }
     }
 
-    #[cfg(feature = "sync")]
-    fn post_sync<B, R>(&self, endpoint: &str, body: B) -> Result<R>
-    where
-        B: serde::ser::Serialize,
-        R: serde::de::DeserializeOwned,
-    {
-        let response = self
-            .sync_client
-            .post(&format!("{}{}", self.base_url, endpoint))
-            .send_json(
-                serde_json::to_value(body).expect("Bug: client couldn't serialize its own type"),
-            );
-        match response.status() {
-            200 => Ok(response
-                .into_json_deserialize()
-                .expect("Bug: client couldn't deserialize api response")),
-            _ => Err(Error::Api(
-                response
-                    .into_json_deserialize::<api::ErrorWrapper>()
-                    .expect("Bug: client couldn't deserialize api error response")
-                    .error,
-            )),
-        }
-    }
-
     /// Get predicted completion of the prompt
     ///
     /// # Errors
@@ -484,19 +394,6 @@ impl Client {
             .post(&format!("engines/{}/completions", args.engine), args)
             .await?)
     }
-
-    /// Get predicted completion of the prompt synchronously
-    ///
-    /// # Error
-    /// - `Error::APIError` if the api returns an error
-    #[cfg(feature = "sync")]
-    pub fn complete_prompt_sync(
-        &self,
-        prompt: impl Into<api::CompletionArgs>,
-    ) -> Result<api::Completion> {
-        let args = prompt.into();
-        self.post_sync(&format!("engines/{}/completions", args.engine), args)
-    }
 }
 
 // TODO: add a macro to de-boilerplate the sync and async tests
@@ -507,18 +404,6 @@ macro_rules! async_test {
         #[cfg(feature = "async")]
         #[tokio::test]
         async fn $test_name() -> crate::Result<()> {
-            $test_body;
-            Ok(())
-        }
-    };
-}
-
-#[allow(unused_macros)]
-macro_rules! sync_test {
-    ($test_name: ident, $test_body: expr) => {
-        #[cfg(feature = "sync")]
-        #[test]
-        fn $test_name() -> crate::Result<()> {
             $test_body;
             Ok(())
         }
